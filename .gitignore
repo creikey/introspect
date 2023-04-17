@@ -1,0 +1,9 @@
+# for debugging
+introspect.rdbg
+
+.vs/
+
+*.exe
+*.ilk
+*.obj
+*.pdb

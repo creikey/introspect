@@ -1,11 +1,4 @@
-
-int otherfunc(MyType p)
+int testfunc(int b)
 {
- return p.party;
-}
-
-int testfunc(MyType b)
-{
- int s = otherfunc(b);
- return 4;
+ return b;
 }

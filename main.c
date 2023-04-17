@@ -13,9 +13,14 @@
 
 Font font = {0};
 
-char ** identifiers = 0; // identifiers
 #define IDENT_INVALID (-1)
-typedef int IdentID; // index into identifiers
+
+typedef struct
+{
+ const char *filename;
+ char *text; // loaded by raylib
+ size_t text_len;
+} File;
 
 typedef struct
 {
@@ -23,31 +28,8 @@ typedef struct
  int column;
  int end_column;
  bool is_usage; // if not usage, is a declaration
- IdentID identifier;
+ int file_index;
 } TextThing;
-
-typedef struct
-{
- const char *filename;
- char *text; // loaded by raylib
- size_t text_len;
- TextThing *decls_and_usages;
-} File;
-
-IdentID find_ident(const char *name)
-{
- IdentID found_identifier = IDENT_INVALID;
- for(int i = 0; i < arrlen(identifiers); i++)
- {
-  if(strcmp(identifiers[i], name) == 0)
-  {
-   found_identifier = (IdentID)i;
-   break;
-  }
- }
-
- return found_identifier;
-}
 
 char *into_arr(CXString s)
 {
@@ -71,20 +53,37 @@ char *into_arr(CXString s)
 
 File *files = 0;
 
+typedef struct
+{
+ int index;
+ bool valid;
+} NodeRef;
+
 typedef struct NodeTextThing
 {
- TextThing *pointing_at;
+ TextThing text;
+
  Vector2 position;
  Vector2 vel;
- struct NodeTextThing *connected_to;
+ NodeRef *connections;
+
 } NodeTextThing;
 
-NodeTextThing *nodes = 0;
+
+bool at_same_spot(TextThing *a, TextThing *b)
+{
+ return a->line == b->line && a->column == b->column;
+}
 
 
 // And it’s so darn easy. Really. Those Clang folks really did an awesome work
 
-File *to_fill = 0;
+NodeTextThing *nodes = 0;
+
+struct { char *key; NodeRef value; } * ident_name_to_definition = 0;
+
+bool generating_connections = false;
+int cur_file_index = 0;
 enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData client_data)
 {
  enum CXCursorKind kind = clang_getCursorKind(cursor);
@@ -119,7 +118,6 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
  line -= 1;
  column -= 1;
 
-
  CXCursor semantic_parent = clang_getCursorSemanticParent(cursor);
  char *semantic_parent_kind_str = into_arr(clang_getCursorKindSpelling(clang_getCursorKind(semantic_parent)));
 
@@ -131,28 +129,38 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
  bool is_reference_to_decl = kind == CXCursor_DeclRefExpr || kind == CXCursor_UnexposedExpr || kind == CXCursor_TypeRef;
  bool is_decl = kind == CXCursor_VarDecl || kind == CXCursor_FunctionDecl || kind == CXCursor_ParmDecl || kind == CXCursor_FieldDecl || kind == CXCursor_TypedefDecl;
 
- if(to_fill == 0)
+ TextThing cur_thing = { .line = line, .column = column, .end_column = column + (int)arrlen(name_str)-1, .file_index = cur_file_index };
+ if(generating_connections)
  {
-  // just filling out identifiers array
-  if(is_decl)
+  if(is_reference_to_decl)
   {
-   char *new_identifier = 0;
-   for(int i = 0; i < arrlen(name_str); i++)
+   NodeTextThing *from = 0;
+   
+   ARRITER(NodeTextThing, nodes)
    {
-    arrput(new_identifier, name_str[i]);
-   }
-
-   bool duplicate = false;
-   for(int i = 0; i < arrlen(identifiers); i++)
-   {
-    if(strcmp(identifiers[i], new_identifier) == 0)
+    if(at_same_spot(&it->text, &cur_thing))
     {
-     duplicate = true;
+     from = it;
+     break;
     }
    }
-   if(!duplicate)
+
+   if(!from)
    {
-    arrput(identifiers, new_identifier);
+    printf("Couldn't find ident `%s` at line %d col %d\n", name_str, cur_thing.line, cur_thing.column);
+   }
+   else
+   {
+    NodeRef referenced = shget(ident_name_to_definition, name_str);
+    if(referenced.valid)
+    {
+     assert(referenced.index >= 0 && referenced.index < arrlen(nodes));
+     arrput(from->connections, referenced);
+    }
+    else
+    {
+     printf("Couldn't find ident reference to `%s`\n", name_str);
+    }
    }
   }
  }
@@ -160,14 +168,7 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
  {
   if(is_reference_to_decl || is_decl)
   {
-   IdentID found_identifier = find_ident(name_str);
-   if(found_identifier == IDENT_INVALID)
    {
-    //printf("Unknown identifier %s\n", name_str);
-   }
-   else
-   {
-    TextThing cur_thing = { .identifier = found_identifier, .line = line, .column = column, .end_column = column + (int)arrlen(name_str)-1 };
     if(is_decl)
     {
      cur_thing.is_usage = false;
@@ -182,12 +183,11 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
     }
 
     bool duplicate = false;
-    for(int i = 0; i < arrlen(to_fill->decls_and_usages); i++)
+    for(int i = 0; i < arrlen(nodes); i++)
     {
-     TextThing *a = &to_fill->decls_and_usages[i];
+     TextThing *a = &nodes[i].text;
      TextThing *b = &cur_thing;
-     bool at_same_spot = a->line == b->line && a->column == b->column;
-     if(at_same_spot)
+     if(at_same_spot(a, b))
      {
       duplicate = true;
       break;
@@ -198,7 +198,24 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
     }
     else
     {
-     arrput(to_fill->decls_and_usages, cur_thing);
+     NodeTextThing new_node = (NodeTextThing){
+      .text = cur_thing,
+     };
+     arrput(nodes, new_node);
+
+     if(is_decl)
+     {
+      char *cloned_name_str = 0;
+      for(int i = 0; i < arrlen(name_str); i++)
+      {
+       arrput(cloned_name_str, name_str[i]);
+      }
+      shput(ident_name_to_definition, cloned_name_str, ((NodeRef){.valid = true, .index = (int)arrlen(nodes)-1}));
+      for(int i = 0; i < shlen(ident_name_to_definition); i++)
+      {
+       printf("Key %s\n", ident_name_to_definition[i].key);
+      }
+     }
     }
    }
   }
@@ -255,6 +272,13 @@ int main(int argc, char **argv)
 
  for(int i = 1; i < argc; i++)
  {
+  File new_file = {0};
+  new_file.text = LoadFileText(argv[i]);
+  new_file.text_len = strlen(new_file.text);
+  new_file.filename = argv[i];
+  arrput(files, new_file);
+
+
   CXIndex index = clang_createIndex(0, 0);
   printf("Parsing `%s`\n", argv[i]);
   CXTranslationUnit unit = clang_parseTranslationUnit(
@@ -265,68 +289,41 @@ int main(int argc, char **argv)
 
   assert(unit != 0);
 
+
+  cur_file_index = (int)arrlen(files)-1;
   CXCursor cursor = clang_getTranslationUnitCursor(unit);
-  to_fill = 0;
   clang_visitChildren(cursor, on_visit, NULL);
 
   clang_disposeTranslationUnit(unit);
   clang_disposeIndex(index);
- }
 
- for(int i = 0; i < arrlen(identifiers); i++)
- {
-  printf("Found identifier %s\n", identifiers[i]);
  }
 
  for(int i = 1; i < argc; i++)
  {
-  File new_file = {0};
-  new_file.text = LoadFileText(argv[i]);
-  new_file.text_len = strlen(new_file.text);
-  new_file.filename = argv[i];
-
   CXIndex index = clang_createIndex(0, 0);
+  printf("Creating connections in  `%s`\n", argv[i]);
   CXTranslationUnit unit = clang_parseTranslationUnit(
     index,
     argv[i], NULL, 0,
     NULL, 0,
     CXTranslationUnit_None);
-  assert(unit);
+
+  assert(unit != 0);
 
   CXCursor cursor = clang_getTranslationUnitCursor(unit);
-  to_fill = &new_file;
+  generating_connections = true;
   clang_visitChildren(cursor, on_visit, NULL);
-
-  qsort(to_fill->decls_and_usages, arrlen(to_fill->decls_and_usages), sizeof(TextThing), text_thing_cmp);
-
-  arrput(files, new_file);
 
   clang_disposeTranslationUnit(unit);
   clang_disposeIndex(index);
  }
 
- ARRITER(TextThing, files->decls_and_usages)
- {
-  int random_max = 1000;
-  Vector2 new_pos = (Vector2){(float)GetRandomValue(-random_max, random_max), (float)GetRandomValue(-random_max, random_max)};
-  arrput(nodes, ((NodeTextThing){.pointing_at = it, .position = new_pos}) );
- }
-
  ARRITER(NodeTextThing, nodes)
  {
-  NodeTextThing *from = it;
-  from->connected_to = 0;
-  if(from->pointing_at->is_usage)
-  {
-   ARRITER(NodeTextThing, nodes)
-   {
-    if(!it->pointing_at->is_usage && it->pointing_at->identifier == from->pointing_at->identifier)
-    {
-     from->connected_to = it;
-     break;
-    }
-   }
-  }
+  int random_max = 10000;
+  Vector2 new_pos = (Vector2){(float)GetRandomValue(-random_max, random_max), (float)GetRandomValue(-random_max, random_max)};
+  it->position = new_pos;
  }
 
  const int screenWidth = 800;
@@ -355,11 +352,6 @@ int main(int argc, char **argv)
   // I'm deeply unserious I'm deeply unserious
   // I'm deeply unserious I'm deeply unserious
 
-  
-  /*
-   * 
-   */
-
   Vector2 want_mouse_pos = GetMousePosition();
   Vector2 before_world_space = GetScreenToWorld2D(want_mouse_pos, camera);
 
@@ -374,8 +366,6 @@ int main(int argc, char **argv)
   mouse_delta = Vector2Scale(mouse_delta, 1.0f/camera.zoom);
   camera.target = Vector2Add(camera.target, mouse_delta);
 
-  /*
-  */
 
   BeginDrawing();
   BeginMode2D(camera);
@@ -399,6 +389,23 @@ int main(int argc, char **argv)
   File *to_draw = &files[0];
   Vector2 world_mouse = GetScreenToWorld2D(GetMousePosition(), camera);
   float dt = GetFrameTime();
+  if(dt > 5.0f/60.0f) dt = 5.0f /60.0f;
+
+  if(IsKeyDown(KEY_D))
+  {
+   int decl_i = 0;
+   ARRITER(NodeTextThing, nodes)
+   {
+    if(!it->text.is_usage)
+    {
+     it->position.y = decl_i * 1.5f * node_code_size.y;
+     it->position.x = 0.0f;
+     decl_i += 1;
+    }
+   }
+  }
+
+
   ARRITER(NodeTextThing, nodes)
   {
    NodeTextThing *from = it;
@@ -416,7 +423,9 @@ int main(int argc, char **argv)
 
    it->vel = Vector2Scale(it->vel, powf(0.01f, dt));
 
-   it->position = Vector2Add(it->position, Vector2Scale(it->vel, dt));
+   if(dragging != it)
+    it->position = Vector2Add(it->position, Vector2Scale(it->vel, dt));
+
    bool hovering = CheckCollisionPointRec(world_mouse, (Rectangle){
     .x = it->position.x,
     .y = it->position.y,
@@ -439,31 +448,43 @@ int main(int argc, char **argv)
    DrawRectangleV(it->position, node_code_size, (Color){.a = alpha} );
    DrawnCharacter *cur_line = 0;
 
-   if(it->connected_to)
+   NodeTextThing *from_node = it;
+   ARRITER(NodeRef, from_node->connections)
+    if(it->valid)
    {
-    Vector2 from = node_center(it);
-    Vector2 to = node_center(it->connected_to);
+    assert(it->index >= 0 && it->index < arrlen(nodes));
+    NodeTextThing *connected_to = &(nodes[it->index]);
+    Vector2 from = node_center(from_node);
+    Vector2 to = node_center(connected_to);
     DrawLineV(from, to, BLACK);
 
     Vector2 towards = Vector2Subtract(to, from);
-    it->vel = Vector2Add(it->vel, Vector2Scale(towards, dt*10.0f));
+    const float attraction_factor = 2.0f;
+    if(Vector2Length(towards) >= node_code_size.x)
+    {
+     connected_to->vel = Vector2Add(connected_to->vel, Vector2Scale(towards, -dt*attraction_factor));
+     from_node->vel = Vector2Add(from_node->vel,Vector2Scale(towards, dt*attraction_factor));
+    }
    }
 
-   TextThing *to_highlight = it->pointing_at;
+   TextThing *to_highlight = &it->text;
    int line_from = to_highlight->line - lines_above_and_below;
    int line_to = to_highlight->line + lines_above_and_below;
+
+   if(line_from < 0) line_from = 0;
 
    int cur_line_index = 0;
    int cur_col_index = 0;
    int cursor = 0;
    float vertical_position = it->position.y;
+   File *f = &files[it->text.file_index];
 
    // skip to the line
    while(cur_line_index < line_from)
    {
-    if(cursor >= to_draw->text_len) break;
+    if(cursor >= f->text_len) break;
 
-    char curchar = to_draw->text[cursor];
+    char curchar = f->text[cursor];
     if(curchar == '\n')
     {
      cur_line_index++;
@@ -472,15 +493,15 @@ int main(int argc, char **argv)
     cursor++;
    }
 
-   while(cursor < to_draw->text_len)
+   while(cursor < f->text_len)
    {
     if(cur_line_index >= line_to) break;
 
-    char curchar = to_draw->text[cursor];
+    char curchar = f->text[cursor];
     if(curchar == '\r')
     {
     }
-    else if(curchar == '\n' || cursor == to_draw->text_len - 1 || cur_col_index >= max_cols)
+    else if(curchar == '\n' || cursor == f->text_len - 1)
     {
      float vertical_size = glyph_size.y;
      float horizontal_position = it->position.x;
@@ -501,15 +522,12 @@ int main(int argc, char **argv)
      cur_line = 0;
      vertical_position += vertical_size;
 
-     if(curchar == '\n')
-     {
-      cur_line_index += 1;
-     }
+     cur_line_index += 1;
      cur_col_index = -1; // will be incremented in the next line
     }
     else
     {
-     DrawnCharacter new_drawn = { .c = to_draw->text[cursor], .col = BLACK };
+     DrawnCharacter new_drawn = { .c = f->text[cursor], .col = BLACK };
 
      {
       if(to_highlight->line == cur_line_index && to_highlight->column <= cur_col_index && cur_col_index < to_highlight->end_column)
@@ -541,14 +559,19 @@ int main(int argc, char **argv)
 
  ARRITER(File, files)
  {
-  arrfree(it->decls_and_usages);
   UnloadFileText(it->text);
  }
 
- ARRITER(char*, identifiers)
+ ARRITER(NodeTextThing, nodes)
  {
-  arrfree(*it);
+  arrfree(it->connections);
  }
- arrfree(identifiers);
  arrfree(nodes);
+ arrfree(files);
+
+ for(int i = 0; i < shlen(ident_name_to_definition); i++)
+ {
+  arrfree(ident_name_to_definition[i].key);
+ }
+ arrfree(ident_name_to_definition);
 }

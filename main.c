@@ -1,5 +1,7 @@
 #pragma warning(disable : 4996) // fopen is safe. I don't care about fopen_s
 
+#define CINDEX_NO_EXPORTS
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -70,6 +72,7 @@ typedef struct NodeTextThing
 } NodeTextThing;
 
 
+
 bool at_same_spot(TextThing *a, TextThing *b)
 {
  return a->line == b->line && a->column == b->column;
@@ -79,6 +82,11 @@ bool at_same_spot(TextThing *a, TextThing *b)
 // And it’s so darn easy. Really. Those Clang folks really did an awesome work
 
 NodeTextThing *nodes = 0;
+
+NodeRef get_ref(NodeTextThing *n)
+{
+ return (NodeRef) {.index = (int)(n - nodes), .valid = true };
+}
 
 struct { char *key; NodeRef value; } * ident_name_to_definition = 0;
 
@@ -151,11 +159,35 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
    }
    else
    {
-    NodeRef referenced = shget(ident_name_to_definition, name_str);
-    if(referenced.valid)
+    NodeRef ref = {0};
+    CXCursor reference = clang_getCursorReferenced(cursor);
+    if(!clang_Cursor_isNull(reference))
     {
-     assert(referenced.index >= 0 && referenced.index < arrlen(nodes));
-     arrput(from->connections, referenced);
+     unsigned int line = 0;
+     unsigned int column = 0;
+
+     CXSourceLocation reference_loc = clang_getCursorLocation(reference);
+     clang_getPresumedLocation(reference_loc , 0, &line, &column);
+
+     line -= 1;
+     column -= 1;
+
+     ARRITER(NodeTextThing, nodes)
+     {
+      if(!ref.valid && it->text.line == line && it->text.column == column)
+      {
+       ref = get_ref(it);
+      }
+     }
+    }
+    if(!ref.valid)
+    {
+     ref = shget(ident_name_to_definition, name_str);
+    }
+    if(ref.valid)
+    {
+     assert(ref.index >= 0 && ref.index < arrlen(nodes));
+     arrput(from->connections, ref);
     }
     else
     {
@@ -198,7 +230,7 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
     }
     else
     {
-     NodeTextThing new_node = (NodeTextThing){
+     NodeTextThing new_node = (NodeTextThing) {
       .text = cur_thing,
      };
      arrput(nodes, new_node);
@@ -211,10 +243,6 @@ enum CXChildVisitResult on_visit(CXCursor cursor, CXCursor parent, CXClientData 
        arrput(cloned_name_str, name_str[i]);
       }
       shput(ident_name_to_definition, cloned_name_str, ((NodeRef){.valid = true, .index = (int)arrlen(nodes)-1}));
-      for(int i = 0; i < shlen(ident_name_to_definition); i++)
-      {
-       printf("Key %s\n", ident_name_to_definition[i].key);
-      }
      }
     }
    }
@@ -245,9 +273,11 @@ const float font_size = 32.0f;
 const int max_cols = 50;
 const int lines_above_and_below = 3;
 
+Vector2 glyph_size; // assigned on loading of font
+
 Vector2 node_size()
 {
- Vector2 glyph_size = MeasureTextEx(font, "A", font_size, 0.0f);
+ 
  return (Vector2){glyph_size.x*max_cols, (lines_above_and_below*2 + 1)*glyph_size.y};
 }
 
@@ -333,6 +363,7 @@ int main(int argc, char **argv)
  InitWindow(screenWidth, screenHeight, "Introspect");
 
  font = LoadFont("RobotoMono-Regular.ttf");
+ glyph_size = MeasureTextEx(font, "A", font_size, 0.0f);
 
  SetTargetFPS(60);
  Camera2D camera = { 0 };
@@ -378,8 +409,6 @@ int main(int argc, char **argv)
    Color col;
   } DrawnCharacter;
 
-
-  Vector2 glyph_size = MeasureTextEx(font, "A", font_size, 0.0f);
 
   Vector2 node_code_size = node_size();
    
@@ -505,18 +534,23 @@ int main(int argc, char **argv)
     {
      float vertical_size = glyph_size.y;
      float horizontal_position = it->position.x;
+#if 1
      for(int i = 0; i < arrlen(cur_line); i++)
      {
       char cur_char_as_str[2] = {0};
       cur_char_as_str[0] = cur_line[i].c;
       DrawTextEx(font, cur_char_as_str, (Vector2){horizontal_position,vertical_position}, font_size, 0.0f, cur_line[i].col);
-      Vector2 drawn_size = MeasureTextEx(font, cur_char_as_str, font_size, 0.0f);
+      //Vector2 drawn_size = MeasureTextEx(font, cur_char_as_str, font_size, 0.0f);
+      Vector2 drawn_size = glyph_size;
       horizontal_position += drawn_size.x;
       vertical_size = drawn_size.y;
      }
      const char *line_number_str = TextFormat("%d", cur_line_index);
-     float line_number_width = MeasureTextEx(font, line_number_str, font_size, 0.0f).x;
+
+     //float line_number_width = MeasureTextEx(font, line_number_str, font_size, 0.0f).x;
+     float line_number_width = glyph_size.x * strlen(line_number_str);
      DrawTextEx(font, line_number_str, (Vector2){it->position.x - line_number_width, vertical_position}, font_size, 0.0f, LIGHTGRAY);
+#endif
 
      arrfree(cur_line);
      cur_line = 0;

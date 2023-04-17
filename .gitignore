@@ -1,5 +1,7 @@
 # for debugging
 introspect.rdbg
+introspect_debug.exp
+introspect_debug.lib
 
 .vs/
 
